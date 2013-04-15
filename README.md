@@ -20,4 +20,4 @@ You can install the patch by running:
 
 ..or export the embedded patch file:
 
-	foo-patch-from-1.0.0-to-1.0.1.sh --get-patch
+	foo-patch-from-1.0.0-to-1.0.1.sh --get-patch > foo-patch-from-1.0.0-to-1.0.1.diff
