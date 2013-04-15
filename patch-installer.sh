@@ -135,7 +135,13 @@ if test x"$action" = x; then
 	exit 1
 fi
 
-# Execute actions
+# Failover check
+if which diff >/dev/null; then
+	mode=tar
+fi
+
+## Execute actions
+
 case "$action" in
 
 get-patch)
