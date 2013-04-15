@@ -3,6 +3,12 @@ patch-installer
 
 `patch-installer` can be used to create standalone patch scripts. 
 
+Features
+--------
+
+* Requires diff to build patch scripts
+* Requires diff or tar+base64 to deploy patch scripts
+
 USAGE
 -----
 
@@ -21,3 +27,8 @@ You can install the patch by running:
 ..or export the embedded patch file:
 
 	foo-patch-from-1.0.0-to-1.0.1.sh --get-patch > foo-patch-from-1.0.0-to-1.0.1.diff
+
+TODO
+----
+
+* Undo patch feature
