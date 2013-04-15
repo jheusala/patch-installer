@@ -1,5 +1,7 @@
 #!/bin/sh
 set -e
+SELF_PATH="$(readlink -e "$0")"
+SELF_NAME="$(basename "$SELF_PATH")"
 SELF_VERSION=0.0.1
 
 # Parse arguments
@@ -26,28 +28,39 @@ case "$arg" in
   ;;
 
 # Install to target directory
+  --target=*)
+	target="${arg#--target=}"
+  ;;
+
+# Install to target directory
   --install=*)
 	target="${arg#--install=}"
 	action=install
   ;;
 
-# Install to target directory
+# Check files
+  --check=*)
+	target="${arg#--check=}"
+	action=check
+  ;;
+
+# Create install script
   --create=*)
 	patch="${arg#--create=}"
 	action=create
   ;;
 
-# Install to target directory
+# Force actions
   -f|--force)
 	force=1
   ;;
 
 # Actions
-  --get-patch|--get-checks|--create)
+  --get-patch|--get-checks|--create|--check)
 	action="${arg#--}"
   ;;
 
-  get-patch|get-checks|create)
+  get-patch|get-checks|create|check)
 	action="$arg"
   ;;
 
@@ -62,7 +75,7 @@ case "$arg" in
   ### Help
   ### 
   -h|--help|--usage|help)
-    echo 'USAGE: $0 OPTION(S) ACTION'
+    echo 'USAGE: '"$SELF_NAME"' OPTION(S) ACTION'
     echo '  where OPTION is one of:'
     echo '     -f  --force        Force action'
     echo '         --install=DIR  Install the embedded patch to DIR'
@@ -83,7 +96,7 @@ esac
 done
 
 if test x"$action" = x; then
-	$0 --usage
+	$SELF_PATH --usage
 	exit 1
 fi
 
@@ -91,17 +104,83 @@ fi
 case "$action" in
 
 get-patch)
-	grep -E '^\#:' "$0"|sed -re 's/^\#://'
+	grep -E '^\#:' "$SELF_PATH"|sed -re 's/^\#://'
+	exit 0
 	;;
 
 get-checks)
-	$0 get-patch|grep -E '^(sha1sum|missing)'
+	$SELF_PATH get-patch|grep -E '^prev:(sha1sum|missing)'
+	exit 0
 	;;
 
+install)
+	
+	if test -d "$target"; then
+		target="$(cd "$target" && pwd)"
+	else
+		echo "Cannot find target directory: $target" >&2
+		exit 1
+	fi
+
+	$SELF_PATH --check="$target"
+
+	cd "$target"
+	if $SELF_PATH --get-patch|patch -s -p1; then
+		:
+	else
+		echo "Patch failed!" >&2
+		exit 1
+	fi
+
+	echo 'Successfully installed to '"$target"
+	exit 0
+	;;
+
+	
 check)
-	#$0 get-checks|while read line; do
-	#	
-	#done
+	
+	if test -d "$target"; then
+		target="$(cd "$target" && pwd)"
+	else
+		echo "Cannot find target directory: $target" >&2
+		exit 1
+	fi
+	
+	$SELF_PATH get-checks|while read line; do
+		prev="$(echo ":$line"|awk -F':' '{print $2}')"
+		what="$(echo ":$line"|awk -F':' '{print $3}')"
+		# FIXME: There might be files with names having ":"?
+		file="$(echo ":$line"|awk -F':' '{print $4}')"
+		sum="$(echo ":$line"|awk -F':' '{print $5}')"
+		if test x"$prev" = xprev; then
+			if test "x$what" = "xsha1sum"; then
+				if test -f "$target/$file"; then
+					targetsum=$(sha1sum "$target/$file"|awk '{print $1}')
+					if test "x$sum" = "x$targetsum"; then
+						:
+					else
+						echo "$file: Checksum match error" >&2
+						exit 1
+					fi
+				else
+					echo "$file: Target file does not exist - patch might not be compatible?" >&2
+					exit 1
+				fi
+			elif test "x$what" = xmissing; then
+				if test -f "$target/$file"; then
+					echo "$file: Target file exists - patch might not be compatible?" >&2
+					exit 1
+				fi
+			else
+				echo "Unknown check: prev/$what" >&2
+				exit 1
+			fi
+		else
+			echo "Unknown check: $prev" >&2
+			exit 1
+		fi
+	done
+	exit 0
 	;;
 
 create)
@@ -150,16 +229,19 @@ create)
 			exit 1
 		fi
 	fi
+	patch="$(readlink -f "$patch")"
 
 	ln -s "$prev" "$prevln"
-	ln -s "$next" $nextln"
+	ln -s "$next" "$nextln"
 
-	cat "$0" > "$tmpfile"
+	cat "$SELF_PATH" > "$tmpfile"
 
 	echo "#:Embedded patch for patch-installer.sh" >> "$tmpfile"
 	echo "#:version:$SELF_VERSION" >> "$tmpfile"
 
-	if (cd "$tmpdir" && diff -purN "prevln/" "nextln/") > "$tmpfile2"; then
+	cd "$tmpdir"
+
+	if diff -purN prevln/ nextln/ > "$tmpfile2"; then
 		echo "Error: Sources are same!" >&2
 		exit 1
 	else
@@ -172,11 +254,12 @@ create)
 		fi
 	fi
 
-	cat "$tmpfile2"|grep -E '^(\-\-\-)'|sed -re 's/^(\-\-\-)\s+//' -e 's/\t.*$//'|sort|uniq|while read file; do
-		if test -f "$file"; then
-			sha1sum "$file"|sed -re 's/^/#:sha1sum:/' >> "$tmpfile"
+	cat "$tmpfile2"|grep -E '^(\-\-\-)'|sed -re 's/^(\-\-\-)\s+//' -e 's/\t.*$//' -e 's@^prevln/@@'|sort|uniq|while read file; do
+		if test -f "prevln/$file"; then
+			sum=$(sha1sum "prevln/$file"|awk '{print $1}')
+			echo "#:prev:sha1sum:$file:$sum" >> "$tmpfile"
 		else
-			echo "#:missing:$file" >> "$tmpfile"
+			echo "#:prev:missing:$file" >> "$tmpfile"
 		fi
 	done
 	echo "#:" >> "$tmpfile"
@@ -188,11 +271,13 @@ create)
 		cp -f "$tmpfile" "$patch"
 		chmod 700 "$patch"
 	fi
+	echo 'Successfully created '"$patch"
 
 	rm -f -- "$tmpfile" "$tmpfile2" "$prevln" "$nextln"
 	rmdir "$tmpdir"
 	trap - EXIT
-	exit
+
+	exit 0
 	;;
 esac
 
