@@ -29,9 +29,10 @@
 set -e
 SELF_PATH="$(readlink -e "$0")"
 SELF_NAME="$(basename "$SELF_PATH")"
-SELF_VERSION=0.0.1
+SELF_VERSION=0.0.2
 
 # Parse arguments
+mode='diff'
 force='0'
 action=''
 patch=''
@@ -40,6 +41,11 @@ prev=''
 next=''
 for arg in "$@"; do
 case "$arg" in
+
+# Patch mode (diff or tar)
+  --mode=*)
+	mode="${arg#--mode=}"
+  ;;
 
 # Patch file argument
   --patch=*)
@@ -83,11 +89,11 @@ case "$arg" in
   ;;
 
 # Actions
-  --get-patch|--get-checks|--create|--check)
+  --get-patch|--get-tar|--get-checks|--create|--check)
 	action="${arg#--}"
   ;;
 
-  get-patch|get-checks|create|check)
+  get-patch|get-tar|get-checks|create|check)
 	action="$arg"
   ;;
 
@@ -104,18 +110,20 @@ case "$arg" in
   -h|--help|--usage|help)
     echo 'USAGE: '"$SELF_NAME"' OPTION(S) ACTION'
     echo '  where OPTION is one of:'
-    echo '     -f  --force        Force action'
-    echo '         --install=DIR  Install the embedded patch to DIR'
-    echo '         --check=DIR    Verify compatibility of DIR for the embedded patch'
-    echo '         --prev=DIR     Original source directory for create action'
-    echo '         --next=DIR     New source directory for create action'
-    echo '         --create=FILE  Create install script to FILE'
+    echo '     -f  --force          Force action'
+    echo '         --mode=diff|tar  Patch mode'
+    echo '         --install=DIR    Install the embedded patch to DIR'
+    echo '         --check=DIR      Verify compatibility of DIR for the embedded patch'
+    echo '         --prev=DIR       Original source directory for create action'
+    echo '         --next=DIR       New source directory for create action'
+    echo '         --create=FILE    Create install script to FILE'
     echo '  where ACTION is one of:'
-    echo '         get-checks   Print embedded checksums'
-    echo '         get-patch  Print the embedded diff'
-    echo '         check      Verify compatibility of the patch'
-    echo '         install    Install the patch'
-    echo '         create     Create embedded patch installer script'
+    echo '         get-checks       Print embedded checksums'
+    echo '         get-patch        Print the embedded diff'
+    echo '         get-tar          Print the embedded tar'
+    echo '         check            Verify compatibility of the patch'
+    echo '         install          Install the patch'
+    echo '         create           Create embedded patch installer script'
     echo
     exit 0
   ;;  
@@ -131,12 +139,17 @@ fi
 case "$action" in
 
 get-patch)
-	grep -E '^\#:' "$SELF_PATH"|sed -re 's/^\#://'
+	grep -E '^\#:diff:' "$SELF_PATH"|sed -re 's/^\#:diff://'
+	exit 0
+	;;
+
+get-tar)
+	grep -E '^\#:tar:' "$SELF_PATH"|sed -re 's/^\#:tar://'|base64 -d
 	exit 0
 	;;
 
 get-checks)
-	$SELF_PATH get-patch|grep -E '^prev:(sha1sum|missing)'
+	grep -E '^\#:check:' "$SELF_PATH"|sed -re 's/^\#:check://'|grep -E '^prev:(sha1sum|missing)'
 	exit 0
 	;;
 
@@ -151,12 +164,22 @@ install)
 
 	$SELF_PATH --check="$target"
 
-	cd "$target"
-	if $SELF_PATH --get-patch|patch -s -p1; then
-		:
+	if test "x$mode" = xdiff; then
+		cd "$target"
+		if $SELF_PATH --mode="$mode" --get-patch|patch -s -p1; then
+			:
+		else
+			echo "Patch failed!" >&2
+			exit 1
+		fi
 	else
-		echo "Patch failed!" >&2
-		exit 1
+		cd "$target"
+		if $SELF_PATH --mode="$mode" --get-tar|tar xf -; then
+			:
+		else
+			echo "Patch failed!" >&2
+			exit 1
+		fi
 	fi
 
 	echo 'Successfully installed to '"$target"
@@ -214,9 +237,10 @@ create)
 	tmpdir="$(mktemp -d)"
 	tmpfile="$tmpdir/foo.sh"
 	tmpfile2="$tmpdir/foo.diff"
+	tmpfile3="$tmpdir/foo.tar"
 	prevln="$tmpdir/prevln"
 	nextln="$tmpdir/nextln"
-	trap "rm -f -- '$tmpfile' '$tmpfile2' '$prevln' '$nextln'; test -d '$tmpdir' && rmdir '$tmpdir'" EXIT
+	trap "rm -f -- '$tmpfile' '$tmpfile2' '$tmpfile3' '$prevln' '$nextln'; test -d '$tmpdir' && rmdir '$tmpdir'" EXIT
 
 	chmod 700 "$tmpdir"
 
@@ -225,6 +249,9 @@ create)
 
 	touch "$tmpfile2"
 	chmod 600 "$tmpfile2"
+
+	touch "$tmpfile3"
+	chmod 600 "$tmpfile3"
 
 	if test -z "$prev"; then
 		echo 'Error: --prev not set' >&2
@@ -263,7 +290,8 @@ create)
 
 	cat "$SELF_PATH" > "$tmpfile"
 
-	echo "#:Embedded patch for patch-installer.sh" >> "$tmpfile"
+	echo "# Embedded patch made by @jheusala's patch-installer.sh" >> "$tmpfile"
+	echo "#:mode:$mode" >> "$tmpfile"
 	echo "#:version:$SELF_VERSION" >> "$tmpfile"
 
 	cd "$tmpdir"
@@ -281,17 +309,29 @@ create)
 		fi
 	fi
 
+	if test x"$mode" = xtar; then
+		files="$(cat "$tmpfile2"|grep -E '^(\-\-\-)'|sed -re 's/^(\-\-\-)\s+//' -e 's/\t.*$//' -e 's@^prevln/@@'|sort|uniq)"
+		if tar -C nextln/ -cf "$tmpfile3" $files; then
+			:
+		else
+			echo 'Error: Failed to tar changed files!' >&2
+			exit 1
+		fi
+	fi
+
 	cat "$tmpfile2"|grep -E '^(\-\-\-)'|sed -re 's/^(\-\-\-)\s+//' -e 's/\t.*$//' -e 's@^prevln/@@'|sort|uniq|while read file; do
 		if test -f "prevln/$file"; then
 			sum=$(sha1sum "prevln/$file"|awk '{print $1}')
-			echo "#:prev:sha1sum:$file:$sum" >> "$tmpfile"
+			echo "#:check:prev:sha1sum:$file:$sum" >> "$tmpfile"
 		else
-			echo "#:prev:missing:$file" >> "$tmpfile"
+			echo "#:check:prev:missing:$file" >> "$tmpfile"
 		fi
 	done
 	echo "#:" >> "$tmpfile"
 	
-	cat "$tmpfile2"|sed -re 's/^/#:/' >> "$tmpfile"
+	cat "$tmpfile2"|sed -re 's/^/#:diff:/' >> "$tmpfile"
+	cat "$tmpfile3"|base64|sed -re 's/^/#:tar:/' >> "$tmpfile"
+
 	if test -z "$patch"; then
 		cat "$tmpfile"
 	else
@@ -300,7 +340,7 @@ create)
 	fi
 	echo 'Successfully created '"$patch"
 
-	rm -f -- "$tmpfile" "$tmpfile2" "$prevln" "$nextln"
+	rm -f -- "$tmpfile" "$tmpfile2" "$tmpfile3" "$prevln" "$nextln"
 	rmdir "$tmpdir"
 	trap - EXIT
 
